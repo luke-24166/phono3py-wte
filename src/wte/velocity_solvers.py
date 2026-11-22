@@ -24,21 +24,11 @@ from wte.velocity_operator import VelocityOperator
 
 
 class VelocityOperatorSolver:
-    """Compute velocity operator and its symmetrised outer product at a grid point.
+    """Compute velocity operators and their symmetrised outer products.
 
     This solver implements the ``VelocitySolver`` protocol for the Wigner
     transport equation.  It wraps phonopy's ``VelocityOperator`` and computes
     the k-star-averaged outer product of the velocity operator matrix.
-
-    The returned ``VelocityResult`` contains:
-    - ``group_velocities`` (num_band0, 3): diagonal (standard) group velocities,
-      with degenerate-subspace diagonalisation applied.
-    - ``gv_by_gv`` (num_band0, 6): real diagonal of the outer product (standard
-      BTE-compatible).
-    - ``vm_by_vm`` (num_band0, num_band, 6): complex k-star-averaged outer
-      product  V(s,s') x V*(s,s') packed into 6 Voigt components (xx, yy, zz,
-      yz, xz, xy).
-    - ``extra["velocity_operator"]``: raw velocity operator matrix.
 
     Notes
     -----
@@ -84,37 +74,37 @@ class VelocityOperatorSolver:
             frequency_factor_to_THz=pp.frequency_factor_to_THz,
         )
 
-    def compute(self, grid_point: int) -> VelocityResult:
-        """Compute velocity operator quantities at a grid point.
+    def compute(self, grid_points: int | NDArray[np.int64]) -> VelocityResult:
+        """Compute velocities and Voigt-packed operator products in input order.
 
-        Parameters
-        ----------
-        grid_point : int
-            BZ grid point index.
-
-        Returns
-        -------
-        VelocityResult
-            ``group_velocities`` (num_band0, 3), ``gv_by_gv``
-            (num_band0, 6) real, and ``vm_by_vm``
-            (num_band0, num_band, 6) complex are set.
-            ``extra["velocity_operator"]`` contains the raw operator for HDF5.
-
+        A sequence, including a singleton, adds a leading grid-point axis.
+        A scalar returns the tensors for one grid point.
         """
+        indices = np.asarray(grid_points)
+        if indices.ndim == 0:
+            gv, vm_by_vm = self._compute_at_grid_point(indices.item())
+        elif indices.ndim == 1:
+            num_band0 = len(self._pp.band_indices)
+            num_band = 3 * len(self._pp.primitive)
+            gv = np.empty((len(indices), num_band0, 3), dtype="double")
+            vm_by_vm = np.empty((len(indices), num_band0, num_band, 6), dtype="cdouble")
+            for i, grid_point in enumerate(indices):
+                gv[i], vm_by_vm[i] = self._compute_at_grid_point(grid_point)
+        else:
+            raise ValueError("Expected one grid point or a one-dimensional grid.")
+        return VelocityResult(group_velocities=gv, vm_by_vm=vm_by_vm)
+
+    def _compute_at_grid_point(
+        self, grid_point: int
+    ) -> tuple[NDArray[np.double], NDArray[np.cdouble]]:
         q_point = get_qpoints_from_bz_grid_points(grid_point, self._pp.bz_grid)
         self._velocity_obj.run([q_point])
         assert self._velocity_obj.velocity_operators is not None
-        # Full operator at this q: (nat3, nat3, 3)
         gv_op_full = self._velocity_obj.velocity_operators[0]
-        # Filter to selected bands: (num_band0, nat3, 3)
-        band_indices = self._pp.band_indices
-        gv_op = gv_op_full[band_indices, :, :]
-
-        gv = self._get_group_velocities(grid_point, gv_op_full)
-        vm_by_vm = self._get_gv_by_gv_operator(grid_point, gv_op)
-        return VelocityResult(
-            group_velocities=gv,
-            vm_by_vm=vm_by_vm,
+        gv_op = gv_op_full[self._pp.band_indices]
+        return (
+            self._get_group_velocities(grid_point, gv_op_full),
+            self._get_gv_by_gv_operator(grid_point, gv_op),
         )
 
     # ------------------------------------------------------------------
